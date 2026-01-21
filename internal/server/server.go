@@ -34,6 +34,7 @@ func registerTools(s *server.MCPServer, mgr *manager.Manager) {
 	allTools = append(allTools, tools.RegisterExecutionTools(mgr)...)
 	allTools = append(allTools, tools.RegisterREPLTools(mgr)...)
 	allTools = append(allTools, tools.RegisterWorkspaceTools(mgr)...)
+	allTools = append(allTools, tools.RegisterProcessTools(mgr)...)
 
 	// Register each tool with the server
 	for _, td := range allTools {
@@ -49,6 +50,7 @@ func ServerTools(mgr *manager.Manager) []mcp.Tool {
 	allTools = append(allTools, tools.RegisterExecutionTools(mgr)...)
 	allTools = append(allTools, tools.RegisterREPLTools(mgr)...)
 	allTools = append(allTools, tools.RegisterWorkspaceTools(mgr)...)
+	allTools = append(allTools, tools.RegisterProcessTools(mgr)...)
 
 	result := make([]mcp.Tool, len(allTools))
 	for i, td := range allTools {

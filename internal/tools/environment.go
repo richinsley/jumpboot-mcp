@@ -13,10 +13,9 @@ func RegisterEnvironmentTools(mgr *manager.Manager) []ToolDef {
 	return []ToolDef{
 		{
 			Tool: mcp.NewTool("create_environment",
-				mcp.WithDescription("Create a new Python environment"),
+				mcp.WithDescription("Create a new Python environment. Creates a venv from a cached micromamba base (independent of system Python). First call for a Python version creates the base (slower), subsequent calls are fast."),
 				mcp.WithString("name", mcp.Required(), mcp.Description("Name for the environment")),
 				mcp.WithString("python_version", mcp.Description("Python version (e.g., '3.11'). Default: '3.11'")),
-				mcp.WithBoolean("use_micromamba", mcp.Description("Use micromamba instead of venv. Default: true")),
 			),
 			Handler: createEnvironmentHandler(mgr),
 		},
@@ -55,9 +54,8 @@ func createEnvironmentHandler(mgr *manager.Manager) server.ToolHandlerFunc {
 	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		name := request.GetString("name", "")
 		pythonVersion := request.GetString("python_version", "3.11")
-		useMicromamba := request.GetBool("use_micromamba", true)
 
-		info, err := mgr.CreateEnvironment(name, pythonVersion, useMicromamba)
+		info, err := mgr.CreateEnvironment(name, pythonVersion)
 		if err != nil {
 			return mcp.NewToolResultText(manager.ErrorResponse(err)), nil
 		}

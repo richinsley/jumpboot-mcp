@@ -1,23 +1,32 @@
 package manager
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/richinsley/jumpboot"
 )
 
+// DefaultPythonVersion is used when no version is specified
+const DefaultPythonVersion = "3.11"
+
 // Manager tracks active environments and REPL sessions
 type Manager struct {
-	mu           sync.RWMutex
-	environments map[string]*ManagedEnvironment
-	replSessions map[string]*ManagedREPL
-	baseDir      string
+	mu               sync.RWMutex
+	environments     map[string]*ManagedEnvironment
+	replSessions     map[string]*ManagedREPL
+	spawnedProcesses map[string]*ManagedProcess
+	baseEnvironments map[string]*jumpboot.Environment // base envs by version (e.g., "3.11" -> env)
+	baseMu           sync.Mutex                       // separate lock for base environment creation
+	baseDir          string
 }
 
 // ManagedEnvironment wraps a jumpboot Environment with metadata
@@ -26,9 +35,8 @@ type ManagedEnvironment struct {
 	Name         string                `json:"name"`
 	Env          *jumpboot.Environment `json:"-"`
 	PythonVer    string                `json:"python_version"`
-	IsMicromamba bool                  `json:"is_micromamba"`
 	WorkspaceDir string                `json:"workspace_dir,omitempty"`
-	RootDir      string                `json:"root_dir"` // The root directory we created (contains bin, envs, pkgs)
+	RootDir      string                `json:"root_dir"` // The venv directory
 }
 
 // ManagedREPL wraps a jumpboot REPL session with metadata
@@ -44,7 +52,6 @@ type EnvironmentInfo struct {
 	ID            string `json:"id"`
 	Name          string `json:"name"`
 	PythonVersion string `json:"python_version"`
-	IsMicromamba  bool   `json:"is_micromamba"`
 	EnvPath       string `json:"env_path"`
 	WorkspaceDir  string `json:"workspace_dir,omitempty"`
 }
@@ -54,6 +61,33 @@ type REPLInfo struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
 	EnvID string `json:"env_id"`
+}
+
+// ManagedProcess wraps a spawned Python process with metadata
+type ManagedProcess struct {
+	ID            string       `json:"id"`
+	Name          string       `json:"name"`
+	EnvID         string       `json:"env_id"`
+	Cmd           *exec.Cmd    `json:"-"`
+	StartTime     time.Time    `json:"start_time"`
+	CaptureOutput bool         `json:"capture_output"`
+	outputMu      sync.RWMutex // protects outputLines
+	outputLines   []string     // circular buffer of output lines
+	maxLines      int          // max lines to keep
+	done          chan struct{}
+	exitCode      int
+	exited        bool
+}
+
+// ProcessInfo is the serializable info about a spawned process
+type ProcessInfo struct {
+	ID        string    `json:"id"`
+	Name      string    `json:"name"`
+	EnvID     string    `json:"env_id"`
+	PID       int       `json:"pid"`
+	StartTime time.Time `json:"start_time"`
+	Running   bool      `json:"running"`
+	ExitCode  int       `json:"exit_code,omitempty"`
 }
 
 // NewManager creates a new environment manager
@@ -71,55 +105,96 @@ func NewManager(baseDir string) (*Manager, error) {
 	}
 
 	return &Manager{
-		environments: make(map[string]*ManagedEnvironment),
-		replSessions: make(map[string]*ManagedREPL),
-		baseDir:      baseDir,
+		environments:     make(map[string]*ManagedEnvironment),
+		replSessions:     make(map[string]*ManagedREPL),
+		spawnedProcesses: make(map[string]*ManagedProcess),
+		baseEnvironments: make(map[string]*jumpboot.Environment),
+		baseDir:          baseDir,
 	}, nil
 }
 
-// CreateEnvironment creates a new Python environment
-func (m *Manager) CreateEnvironment(name, pythonVersion string, useMicromamba bool) (*EnvironmentInfo, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+// getOrCreateBase returns a base micromamba environment for the given Python version.
+// If one doesn't exist, it creates it. Uses baseMu to serialize base creation.
+func (m *Manager) getOrCreateBase(pythonVersion string) (*jumpboot.Environment, error) {
+	// Quick check with read lock
+	m.mu.RLock()
+	if baseEnv, ok := m.baseEnvironments[pythonVersion]; ok {
+		m.mu.RUnlock()
+		return baseEnv, nil
+	}
+	m.mu.RUnlock()
 
+	// Serialize base creation (but don't block other operations)
+	m.baseMu.Lock()
+	defer m.baseMu.Unlock()
+
+	// Double-check after acquiring lock
+	m.mu.RLock()
+	if baseEnv, ok := m.baseEnvironments[pythonVersion]; ok {
+		m.mu.RUnlock()
+		return baseEnv, nil
+	}
+	m.mu.RUnlock()
+
+	// Create a new base environment (slow operation, no locks held)
+	baseName := fmt.Sprintf("base_%s", pythonVersion)
+	basePath := filepath.Join(m.baseDir, "bases", baseName)
+
+	baseEnv, err := jumpboot.CreateEnvironmentMamba(baseName, basePath, pythonVersion, "conda-forge", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create base environment for Python %s: %w", pythonVersion, err)
+	}
+
+	// Store the base environment
+	m.mu.Lock()
+	m.baseEnvironments[pythonVersion] = baseEnv
+	m.mu.Unlock()
+
+	return baseEnv, nil
+}
+
+// CreateEnvironment creates a new Python environment.
+// Creates a venv from a cached micromamba base environment (independent of system Python).
+func (m *Manager) CreateEnvironment(name, pythonVersion string) (*EnvironmentInfo, error) {
+	// Use default version if not specified
+	if pythonVersion == "" {
+		pythonVersion = DefaultPythonVersion
+	}
+
+	// Generate ID and path for the venv
 	id := uuid.New().String()
 	envPath := filepath.Join(m.baseDir, id)
 
-	var env *jumpboot.Environment
-	var err error
-
-	if useMicromamba {
-		env, err = jumpboot.CreateEnvironmentMamba(name, envPath, pythonVersion, "conda-forge", nil)
-	} else {
-		// For venv, we need a base environment first (system Python)
-		baseEnv, baseErr := jumpboot.CreateEnvironmentFromSystem()
-		if baseErr != nil {
-			return nil, fmt.Errorf("failed to get system Python for venv: %w", baseErr)
-		}
-		env, err = jumpboot.CreateVenvEnvironment(baseEnv, envPath, jumpboot.VenvOptions{}, nil)
+	// Get or create base environment (handles its own locking)
+	baseEnv, err := m.getOrCreateBase(pythonVersion)
+	if err != nil {
+		return nil, err
 	}
 
+	// Create venv from base (runs without holding the main lock)
+	env, err := jumpboot.CreateVenvEnvironment(baseEnv, envPath, jumpboot.VenvOptions{}, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create environment: %w", err)
+		return nil, fmt.Errorf("failed to create venv: %w", err)
 	}
 
 	managed := &ManagedEnvironment{
-		ID:           id,
-		Name:         name,
-		Env:          env,
-		PythonVer:    pythonVersion,
-		IsMicromamba: useMicromamba,
-		RootDir:      envPath, // Store the root directory we created
+		ID:        id,
+		Name:      name,
+		Env:       env,
+		PythonVer: pythonVersion,
+		RootDir:   envPath,
 	}
 
+	// Only hold lock briefly to store the result
+	m.mu.Lock()
 	m.environments[id] = managed
+	m.mu.Unlock()
 
 	return &EnvironmentInfo{
-		ID:           id,
-		Name:         name,
+		ID:            id,
+		Name:          name,
 		PythonVersion: env.PythonVersion.String(),
-		IsMicromamba: useMicromamba,
-		EnvPath:      env.EnvPath,
+		EnvPath:       env.EnvPath,
 	}, nil
 }
 
@@ -146,7 +221,6 @@ func (m *Manager) ListEnvironments() []EnvironmentInfo {
 			ID:            env.ID,
 			Name:          env.Name,
 			PythonVersion: env.Env.PythonVersion.String(),
-			IsMicromamba:  env.IsMicromamba,
 			EnvPath:       env.Env.EnvPath,
 			WorkspaceDir:  env.WorkspaceDir,
 		})
@@ -162,6 +236,21 @@ func (m *Manager) DestroyEnvironment(id string) error {
 	env, ok := m.environments[id]
 	if !ok {
 		return fmt.Errorf("environment not found: %s", id)
+	}
+
+	// Kill any spawned processes using this environment
+	for procID, proc := range m.spawnedProcesses {
+		if proc.EnvID == id {
+			proc.outputMu.RLock()
+			exited := proc.exited
+			proc.outputMu.RUnlock()
+
+			if !exited && proc.Cmd.Process != nil {
+				proc.Cmd.Process.Kill()
+				<-proc.done
+			}
+			delete(m.spawnedProcesses, procID)
+		}
 	}
 
 	// Close any REPL sessions using this environment
@@ -249,22 +338,20 @@ func (m *Manager) RestoreEnvironment(name, frozenJSON string) (*EnvironmentInfo,
 	}
 
 	managed := &ManagedEnvironment{
-		ID:           id,
-		Name:         name,
-		Env:          env,
-		PythonVer:    env.PythonVersion.String(),
-		IsMicromamba: true, // Restored environments are micromamba-based
-		RootDir:      envPath,
+		ID:        id,
+		Name:      name,
+		Env:       env,
+		PythonVer: env.PythonVersion.String(),
+		RootDir:   envPath,
 	}
 
 	m.environments[id] = managed
 
 	return &EnvironmentInfo{
-		ID:           id,
-		Name:         name,
+		ID:            id,
+		Name:          name,
 		PythonVersion: env.PythonVersion.String(),
-		IsMicromamba: true,
-		EnvPath:      env.EnvPath,
+		EnvPath:       env.EnvPath,
 	}, nil
 }
 
@@ -371,6 +458,19 @@ func (m *Manager) Shutdown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Kill all spawned processes
+	for _, proc := range m.spawnedProcesses {
+		proc.outputMu.RLock()
+		exited := proc.exited
+		proc.outputMu.RUnlock()
+
+		if !exited && proc.Cmd.Process != nil {
+			proc.Cmd.Process.Kill()
+			<-proc.done
+		}
+	}
+	m.spawnedProcesses = make(map[string]*ManagedProcess)
+
 	// Close all REPL sessions
 	for _, repl := range m.replSessions {
 		if repl.REPL != nil {
@@ -400,6 +500,46 @@ func (m *Manager) InstallPackages(envID string, packages []string, useConda bool
 		if err := env.Env.PipInstallPackages(packages, "", "", false, nil); err != nil {
 			return fmt.Errorf("failed to install packages via pip: %w", err)
 		}
+	}
+
+	return nil
+}
+
+// InstallRequirements installs packages from a requirements.txt file in the workspace
+func (m *Manager) InstallRequirements(envID, requirementsPath string, upgrade bool) error {
+	m.mu.RLock()
+	env, ok := m.environments[envID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return fmt.Errorf("environment not found: %s", envID)
+	}
+
+	if env.WorkspaceDir == "" {
+		return fmt.Errorf("no workspace created for environment: %s", envID)
+	}
+
+	// Sanitize and validate path
+	fullPath, err := safeJoinPath(env.WorkspaceDir, requirementsPath)
+	if err != nil {
+		return err
+	}
+
+	// Check if file exists
+	if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+		return fmt.Errorf("requirements file not found: %s", requirementsPath)
+	}
+
+	// Use the environment's pip to install from requirements file
+	// Run: python -m pip install -r requirements.txt [--upgrade]
+	args := []string{"-m", "pip", "install", "-r", fullPath}
+	if upgrade {
+		args = append(args, "--upgrade")
+	}
+
+	output, err := env.Env.RunPythonReadCombined(args[0], args[1:]...)
+	if err != nil {
+		return fmt.Errorf("failed to install from requirements: %w\nOutput: %s", err, output)
 	}
 
 	return nil
@@ -511,7 +651,7 @@ type FileInfo struct {
 	Size  int64  `json:"size"`
 }
 
-// CreateWorkspace creates a temp code folder for an environment
+// CreateWorkspace creates a code folder for an environment
 func (m *Manager) CreateWorkspace(envID string) (*WorkspaceInfo, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -529,9 +669,9 @@ func (m *Manager) CreateWorkspace(envID string) (*WorkspaceInfo, error) {
 		}, nil
 	}
 
-	// Create a new workspace directory
-	workspaceDir, err := os.MkdirTemp("", fmt.Sprintf("jumpboot-workspace-%s-", envID[:8]))
-	if err != nil {
+	// Create workspace inside the environment's directory
+	workspaceDir := filepath.Join(env.RootDir, "workspace")
+	if err := os.MkdirAll(workspaceDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create workspace: %w", err)
 	}
 
@@ -916,6 +1056,225 @@ func splitOnce(s, sep string) []string {
 		}
 	}
 	return []string{s}
+}
+
+// SpawnProcess starts a Python script that runs in the background
+func (m *Manager) SpawnProcess(envID, scriptPath, name string, args []string, captureOutput bool) (*ProcessInfo, error) {
+	m.mu.RLock()
+	env, ok := m.environments[envID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("environment not found: %s", envID)
+	}
+
+	id := uuid.New().String()
+	if name == "" {
+		name = filepath.Base(scriptPath)
+	}
+
+	// Build command using environment's Python
+	cmdArgs := append([]string{scriptPath}, args...)
+	cmd := exec.Command(env.Env.PythonPath, cmdArgs...)
+	cmd.Dir = env.WorkspaceDir
+
+	// Set up environment variables with the Python environment's bin path
+	cmd.Env = os.Environ()
+	cmd.Env = append(cmd.Env, fmt.Sprintf("PATH=%s%c%s", env.Env.EnvBinPath, filepath.ListSeparator, os.Getenv("PATH")))
+
+	managed := &ManagedProcess{
+		ID:            id,
+		Name:          name,
+		EnvID:         envID,
+		Cmd:           cmd,
+		StartTime:     time.Now(),
+		CaptureOutput: captureOutput,
+		outputLines:   make([]string, 0),
+		maxLines:      1000, // keep last 1000 lines
+		done:          make(chan struct{}),
+	}
+
+	if captureOutput {
+		// Create pipes for stdout and stderr
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create stdout pipe: %w", err)
+		}
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			return nil, fmt.Errorf("failed to create stderr pipe: %w", err)
+		}
+
+		// Start output capture goroutines
+		go managed.captureOutput(stdout)
+		go managed.captureOutput(stderr)
+	}
+
+	// Start the process
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("failed to start process: %w", err)
+	}
+
+	// Monitor process in background
+	go func() {
+		err := cmd.Wait()
+		managed.outputMu.Lock()
+		managed.exited = true
+		if err != nil {
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				managed.exitCode = exitErr.ExitCode()
+			} else {
+				managed.exitCode = -1
+			}
+		} else {
+			managed.exitCode = 0
+		}
+		managed.outputMu.Unlock()
+		close(managed.done)
+	}()
+
+	m.mu.Lock()
+	m.spawnedProcesses[id] = managed
+	m.mu.Unlock()
+
+	return &ProcessInfo{
+		ID:        id,
+		Name:      name,
+		EnvID:     envID,
+		PID:       cmd.Process.Pid,
+		StartTime: managed.StartTime,
+		Running:   true,
+	}, nil
+}
+
+// captureOutput reads from a reader and stores lines in the buffer
+func (p *ManagedProcess) captureOutput(r io.Reader) {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		line := scanner.Text()
+		p.outputMu.Lock()
+		p.outputLines = append(p.outputLines, line)
+		// Keep only the last maxLines
+		if len(p.outputLines) > p.maxLines {
+			p.outputLines = p.outputLines[len(p.outputLines)-p.maxLines:]
+		}
+		p.outputMu.Unlock()
+	}
+}
+
+// ListProcesses returns info about all spawned processes
+func (m *Manager) ListProcesses() []ProcessInfo {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	result := make([]ProcessInfo, 0, len(m.spawnedProcesses))
+	for _, proc := range m.spawnedProcesses {
+		proc.outputMu.RLock()
+		info := ProcessInfo{
+			ID:        proc.ID,
+			Name:      proc.Name,
+			EnvID:     proc.EnvID,
+			PID:       proc.Cmd.Process.Pid,
+			StartTime: proc.StartTime,
+			Running:   !proc.exited,
+			ExitCode:  proc.exitCode,
+		}
+		proc.outputMu.RUnlock()
+		result = append(result, info)
+	}
+	return result
+}
+
+// GetProcessOutput returns the captured output from a spawned process
+func (m *Manager) GetProcessOutput(processID string, tailLines int) ([]string, error) {
+	m.mu.RLock()
+	proc, ok := m.spawnedProcesses[processID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("process not found: %s", processID)
+	}
+
+	if !proc.CaptureOutput {
+		return nil, fmt.Errorf("output capture not enabled for process: %s", processID)
+	}
+
+	proc.outputMu.RLock()
+	defer proc.outputMu.RUnlock()
+
+	if tailLines <= 0 || tailLines >= len(proc.outputLines) {
+		// Return all lines
+		result := make([]string, len(proc.outputLines))
+		copy(result, proc.outputLines)
+		return result, nil
+	}
+
+	// Return last N lines
+	start := len(proc.outputLines) - tailLines
+	result := make([]string, tailLines)
+	copy(result, proc.outputLines[start:])
+	return result, nil
+}
+
+// KillProcess terminates a spawned process
+func (m *Manager) KillProcess(processID string) error {
+	m.mu.Lock()
+	proc, ok := m.spawnedProcesses[processID]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("process not found: %s", processID)
+	}
+	m.mu.Unlock()
+
+	proc.outputMu.RLock()
+	exited := proc.exited
+	proc.outputMu.RUnlock()
+
+	if exited {
+		// Process already exited, just remove it
+		m.mu.Lock()
+		delete(m.spawnedProcesses, processID)
+		m.mu.Unlock()
+		return nil
+	}
+
+	// Kill the process
+	if err := proc.Cmd.Process.Kill(); err != nil {
+		return fmt.Errorf("failed to kill process: %w", err)
+	}
+
+	// Wait for it to fully exit
+	<-proc.done
+
+	m.mu.Lock()
+	delete(m.spawnedProcesses, processID)
+	m.mu.Unlock()
+
+	return nil
+}
+
+// GetProcessInfo returns info about a specific process
+func (m *Manager) GetProcessInfo(processID string) (*ProcessInfo, error) {
+	m.mu.RLock()
+	proc, ok := m.spawnedProcesses[processID]
+	m.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("process not found: %s", processID)
+	}
+
+	proc.outputMu.RLock()
+	defer proc.outputMu.RUnlock()
+
+	return &ProcessInfo{
+		ID:        proc.ID,
+		Name:      proc.Name,
+		EnvID:     proc.EnvID,
+		PID:       proc.Cmd.Process.Pid,
+		StartTime: proc.StartTime,
+		Running:   !proc.exited,
+		ExitCode:  proc.exitCode,
+	}, nil
 }
 
 // Response is a standard response format for MCP tools

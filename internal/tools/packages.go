@@ -26,6 +26,15 @@ func RegisterPackageTools(mgr *manager.Manager) []ToolDef {
 			Handler: installPackagesHandler(mgr),
 		},
 		{
+			Tool: mcp.NewTool("install_requirements",
+				mcp.WithDescription("Install packages from a requirements.txt file in the workspace using the environment's pip"),
+				mcp.WithString("env_id", mcp.Required(), mcp.Description("Environment ID")),
+				mcp.WithString("requirements_path", mcp.Required(), mcp.Description("Path to requirements.txt relative to workspace (e.g., 'repo/requirements.txt')")),
+				mcp.WithBoolean("upgrade", mcp.Description("Upgrade packages if already installed. Default: false")),
+			),
+			Handler: installRequirementsHandler(mgr),
+		},
+		{
 			Tool: mcp.NewTool("list_packages",
 				mcp.WithDescription("List installed packages in an environment"),
 				mcp.WithString("env_id", mcp.Required(), mcp.Description("Environment ID")),
@@ -79,6 +88,32 @@ func installPackagesHandler(mgr *manager.Manager) server.ToolHandlerFunc {
 		return mcp.NewToolResultText(manager.SuccessResponse(map[string]interface{}{
 			"message":  "Packages installed successfully",
 			"packages": packages,
+		})), nil
+	}
+}
+
+func installRequirementsHandler(mgr *manager.Manager) server.ToolHandlerFunc {
+	return func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		envID := request.GetString("env_id", "")
+		if envID == "" {
+			return mcp.NewToolResultText(manager.ErrorResponse(errMissingEnvID)), nil
+		}
+
+		requirementsPath := request.GetString("requirements_path", "")
+		if requirementsPath == "" {
+			return mcp.NewToolResultText(manager.ErrorResponse(errMissingParams)), nil
+		}
+
+		upgrade := request.GetBool("upgrade", false)
+
+		err := mgr.InstallRequirements(envID, requirementsPath, upgrade)
+		if err != nil {
+			return mcp.NewToolResultText(manager.ErrorResponse(err)), nil
+		}
+
+		return mcp.NewToolResultText(manager.SuccessResponse(map[string]interface{}{
+			"message":           "Requirements installed successfully",
+			"requirements_path": requirementsPath,
 		})), nil
 	}
 }
