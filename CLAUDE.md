@@ -21,6 +21,10 @@ go build -o jumpboot-mcp .
 # Run with HTTPS
 ./jumpboot-mcp -transport http -addr :8443 -tls-cert cert.pem -tls-key key.pem
 
+# Docker build and run
+docker build -t jumpboot-mcp .
+docker run -p 8080:8080 -v jumpboot-data:/root/.jumpboot-mcp jumpboot-mcp
+
 # Run tests
 go test ./...
 
@@ -43,12 +47,49 @@ go get github.com/mark3labs/mcp-go
 | `-tls-cert` | | TLS certificate file |
 | `-tls-key` | | TLS key file |
 
+## mDNS Service Discovery Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-note` | `""` | Human-readable server description (e.g., "GPU server for ML") |
+| `-instance-name` | hostname | Unique mDNS instance name |
+| `-mdns-announce` | `true` (HTTP mode) | Enable mDNS service announcement |
+| `-mdns-discover` | `true` (stdio mode) | Enable mDNS service discovery |
+| `-discover-timeout` | `5s` | Discovery wait time at startup |
+
+### mDNS Discovery Flow
+
+**HTTP mode** (server):
+- Announces service via mDNS with type `_jumpboot-mcp._tcp`
+- TXT records include: `endpoint`, `tls`, `note`
+- Other stdio instances can discover and proxy to this server
+
+**Stdio mode** (client):
+- Discovers HTTP instances on local network via mDNS
+- Connects to each discovered server
+- Proxies remote tools with prefixed names (e.g., `gpu-server:create_environment`)
+- Tool descriptions include the server's note (e.g., "[GPU server for ML] Create a new...")
+
+### Example: Distributed Setup
+
+```bash
+# On GPU server (machine A)
+./jumpboot-mcp -transport http -addr :9999 -note "GPU server for ML" -instance-name gpu-server
+
+# On local machine (machine B) - Claude Desktop uses this
+./jumpboot-mcp
+# Discovers gpu-server automatically, registers tools like:
+#   gpu-server:create_environment
+#   gpu-server:run_code
+#   etc.
+```
+
 ## Architecture
 
-**Transport**: stdio (standard MCP transport)
+**Transport**: stdio (standard MCP transport) or HTTP (for containers/remote)
 
 **Core Components**:
-- `main.go` - Entry point, MCP server initialization
+- `main.go` - Entry point, MCP server initialization, mDNS integration
 - `internal/server/server.go` - MCP server configuration and tool registration
 - `internal/manager/manager.go` - Stateful environment manager (tracks environments by UUID, REPL sessions, handles cleanup)
 - `internal/tools/` - MCP tool implementations:
@@ -58,8 +99,17 @@ go get github.com/mark3labs/mcp-go
   - `repl.go` - persistent REPL session management
   - `workspace.go` - persistent code folder management
   - `process.go` - long-running process management (GUI apps, servers, games)
+- `internal/discovery/` - mDNS service discovery:
+  - `discovery.go` - ServiceInfo type, constants
+  - `announce.go` - mDNS announcer for HTTP mode
+  - `browser.go` - mDNS browser for stdio mode
+- `internal/proxy/` - Remote MCP client proxy:
+  - `proxy.go` - RemoteClient wraps mcp-go HTTP client
+  - `aggregator.go` - Aggregates tools from multiple remotes
 
-**Data Flow**: MCP Client → stdio → Server → Manager → Jumpboot Library → Python Environment
+**Data Flow**:
+- Local: MCP Client → stdio → Server → Manager → Jumpboot Library → Python Environment
+- Distributed: MCP Client → stdio → Server → Proxy → HTTP → Remote Server → Manager → Python Environment
 
 ## Data Storage
 

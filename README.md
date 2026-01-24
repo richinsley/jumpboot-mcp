@@ -62,10 +62,11 @@ HTTP transport for containerized deployments or remote access:
 
 ## Configuration
 
-### Claude Desktop (stdio)
+### Claude Desktop
 
 Add to `~/.config/claude/claude_desktop_config.json`:
 
+**stdio (local binary):**
 ```json
 {
   "mcpServers": {
@@ -77,10 +78,13 @@ Add to `~/.config/claude/claude_desktop_config.json`:
 }
 ```
 
-### Claude Code (stdio)
+> **Note:** Claude Desktop currently only supports stdio transport for local binaries. For HTTP transport, use Claude Code or another MCP client with HTTP support.
 
-Add to your MCP settings:
+### Claude Code
 
+Add to your MCP settings (`.mcp.json` or via `claude mcp add`):
+
+**stdio (local binary):**
 ```json
 {
   "mcpServers": {
@@ -91,23 +95,140 @@ Add to your MCP settings:
 }
 ```
 
-### Docker / Container Deployment (HTTP)
-
-For containerized deployments, use HTTP transport:
-
-```dockerfile
-FROM golang:1.21-alpine AS builder
-WORKDIR /app
-COPY . .
-RUN go build -o jumpboot-mcp .
-
-FROM alpine:latest
-COPY --from=builder /app/jumpboot-mcp /usr/local/bin/
-EXPOSE 8080
-CMD ["jumpboot-mcp", "-transport", "http", "-addr", ":8080"]
+**HTTP (remote/container):**
+```json
+{
+  "mcpServers": {
+    "jumpboot": {
+      "type": "url",
+      "url": "http://localhost:8080/mcp"
+    }
+  }
+}
 ```
 
-Connect to the MCP server at `http://container-host:8080/mcp`
+**HTTPS (remote/container with TLS):**
+```json
+{
+  "mcpServers": {
+    "jumpboot": {
+      "type": "url",
+      "url": "https://your-server:8443/mcp"
+    }
+  }
+}
+```
+
+### Docker
+
+A Dockerfile is included for containerized deployments using HTTP transport.
+
+#### Build the Image
+
+```bash
+docker build -t jumpboot-mcp .
+```
+
+#### Run the Container
+
+Basic usage:
+```bash
+docker run -p 8080:8080 jumpboot-mcp
+```
+
+With persistent storage (recommended):
+```bash
+docker run -p 8080:8080 -v jumpboot-data:/root/.jumpboot-mcp jumpboot-mcp
+```
+
+The volume persists cached micromamba bases and environments across container restarts, avoiding repeated Python downloads.
+
+#### Custom Configuration
+
+Override the default command to change options:
+```bash
+# Different port
+docker run -p 9000:9000 jumpboot-mcp -transport http -addr :9000
+
+# Custom endpoint
+docker run -p 8080:8080 jumpboot-mcp -transport http -addr :8080 -endpoint /api/mcp
+
+# Stateless mode
+docker run -p 8080:8080 jumpboot-mcp -transport http -addr :8080 -stateless
+```
+
+#### HTTPS Configuration
+
+To enable HTTPS, mount your TLS certificate and key into the container:
+
+```bash
+docker run -p 8443:8443 \
+  -v /path/to/cert.pem:/certs/cert.pem:ro \
+  -v /path/to/key.pem:/certs/key.pem:ro \
+  -v jumpboot-data:/root/.jumpboot-mcp \
+  jumpboot-mcp \
+  -transport http -addr :8443 -tls-cert /certs/cert.pem -tls-key /certs/key.pem
+```
+
+Or mount a directory containing both files:
+
+```bash
+docker run -p 8443:8443 \
+  -v /path/to/certs:/certs:ro \
+  -v jumpboot-data:/root/.jumpboot-mcp \
+  jumpboot-mcp \
+  -transport http -addr :8443 -tls-cert /certs/cert.pem -tls-key /certs/key.pem
+```
+
+#### Docker Compose Example
+
+HTTP:
+```yaml
+version: '3.8'
+services:
+  jumpboot-mcp:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - jumpboot-data:/root/.jumpboot-mcp
+    restart: unless-stopped
+
+volumes:
+  jumpboot-data:
+```
+
+HTTPS:
+```yaml
+version: '3.8'
+services:
+  jumpboot-mcp:
+    build: .
+    ports:
+      - "8443:8443"
+    volumes:
+      - jumpboot-data:/root/.jumpboot-mcp
+      - ./certs:/certs:ro
+    command: ["-transport", "http", "-addr", ":8443", "-tls-cert", "/certs/cert.pem", "-tls-key", "/certs/key.pem"]
+    restart: unless-stopped
+
+volumes:
+  jumpboot-data:
+```
+
+#### Connecting to the Container
+
+HTTP:
+```
+http://localhost:8080/mcp
+```
+
+HTTPS:
+```
+https://localhost:8443/mcp
+```
+
+For MCP clients that support HTTP transport, configure the appropriate URL based on your setup.
 
 ## MCP Tools (26 total)
 

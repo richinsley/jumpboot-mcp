@@ -14,14 +14,24 @@ const (
 
 // New creates and configures a new MCP server with all tools
 func New(mgr *manager.Manager) *server.MCPServer {
+	return NewWithExtraTools(mgr, nil)
+}
+
+// NewWithExtraTools creates a new MCP server with local tools plus additional tools (e.g., proxied remote tools)
+func NewWithExtraTools(mgr *manager.Manager, extraTools []tools.ToolDef) *server.MCPServer {
 	s := server.NewMCPServer(
 		ServerName,
 		ServerVersion,
 		server.WithToolCapabilities(true),
 	)
 
-	// Register all tools
+	// Register all local tools
 	registerTools(s, mgr)
+
+	// Register extra tools (e.g., proxied remote tools)
+	for _, td := range extraTools {
+		s.AddTool(td.Tool, td.Handler)
+	}
 
 	return s
 }

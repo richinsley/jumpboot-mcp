@@ -1,0 +1,19 @@
+# Git
+.git
+.gitignore
+
+# Go build artifacts
+jumpboot-mcp
+*.exe
+*.test
+*.out
+
+# Local development storage (don't copy your local envs into the image!)
+.jumpboot-mcp
+envs/
+workspace/
+
+# IDE/Editor
+.vscode
+.idea
+*.swp
