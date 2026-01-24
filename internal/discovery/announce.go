@@ -87,6 +87,11 @@ func getLocalIPs() ([]net.IP, error) {
 			continue
 		}
 
+		// Skip virtual/container network interfaces
+		if isVirtualInterface(iface.Name) {
+			continue
+		}
+
 		addrs, err := iface.Addrs()
 		if err != nil {
 			continue
@@ -101,8 +106,8 @@ func getLocalIPs() ([]net.IP, error) {
 				ip = v.IP
 			}
 
-			// Skip loopback and link-local addresses
-			if ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
+			// Skip loopback, link-local, and virtual network addresses
+			if ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !isVirtualIP(ip) {
 				ips = append(ips, ip)
 			}
 		}
@@ -114,6 +119,58 @@ func getLocalIPs() ([]net.IP, error) {
 	}
 
 	return ips, nil
+}
+
+// isVirtualInterface returns true if the interface name indicates a virtual/container network
+func isVirtualInterface(name string) bool {
+	// Common virtual interface prefixes
+	virtualPrefixes := []string{
+		"docker",    // Docker bridge
+		"br-",       // Docker/Linux bridges
+		"veth",      // Virtual ethernet (containers)
+		"virbr",     // libvirt/KVM bridges
+		"vboxnet",   // VirtualBox
+		"vmnet",     // VMware
+		"vnic",      // Virtual NIC
+		"tap",       // TAP devices
+		"tun",       // TUN devices
+		"flannel",   // Kubernetes flannel
+		"cni",       // Container Network Interface
+		"calico",    // Kubernetes calico
+		"weave",     // Kubernetes weave
+		"podman",    // Podman
+		"lxc",       // LXC containers
+		"lxd",       // LXD containers
+	}
+
+	nameLower := strings.ToLower(name)
+	for _, prefix := range virtualPrefixes {
+		if strings.HasPrefix(nameLower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// isVirtualIP returns true if the IP is in a common virtual/container network range
+func isVirtualIP(ip net.IP) bool {
+	// Only check IPv4 addresses
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+
+	// Docker default bridge: 172.17.0.0/16
+	if ip4[0] == 172 && ip4[1] == 17 {
+		return true
+	}
+
+	// Docker user-defined bridges: 172.18.0.0/16 - 172.31.0.0/16
+	if ip4[0] == 172 && ip4[1] >= 18 && ip4[1] <= 31 {
+		return true
+	}
+
+	return false
 }
 
 // GetDefaultInstanceName returns the default instance name (hostname)
