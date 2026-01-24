@@ -27,9 +27,42 @@ cd jumpboot-mcp
 go build -o jumpboot-mcp .
 ```
 
+## Usage
+
+### Transport Options
+
+The server supports two transport modes:
+
+#### stdio (default)
+Standard input/output transport for local use with Claude Desktop or Claude Code:
+```bash
+./jumpboot-mcp
+```
+
+#### HTTP (Streamable HTTP with SSE)
+HTTP transport for containerized deployments or remote access:
+```bash
+./jumpboot-mcp -transport http -addr :8080 -endpoint /mcp
+```
+
+**HTTP Options:**
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-transport` | `stdio` | Transport type: `stdio` or `http` |
+| `-addr` | `:8080` | HTTP server address |
+| `-endpoint` | `/mcp` | HTTP endpoint path |
+| `-stateless` | `false` | Run in stateless mode (no session tracking) |
+| `-tls-cert` | | TLS certificate file (enables HTTPS) |
+| `-tls-key` | | TLS key file (enables HTTPS) |
+
+**HTTPS Example:**
+```bash
+./jumpboot-mcp -transport http -addr :8443 -tls-cert cert.pem -tls-key key.pem
+```
+
 ## Configuration
 
-### Claude Desktop
+### Claude Desktop (stdio)
 
 Add to `~/.config/claude/claude_desktop_config.json`:
 
@@ -44,7 +77,7 @@ Add to `~/.config/claude/claude_desktop_config.json`:
 }
 ```
 
-### Claude Code
+### Claude Code (stdio)
 
 Add to your MCP settings:
 
@@ -57,6 +90,24 @@ Add to your MCP settings:
   }
 }
 ```
+
+### Docker / Container Deployment (HTTP)
+
+For containerized deployments, use HTTP transport:
+
+```dockerfile
+FROM golang:1.21-alpine AS builder
+WORKDIR /app
+COPY . .
+RUN go build -o jumpboot-mcp .
+
+FROM alpine:latest
+COPY --from=builder /app/jumpboot-mcp /usr/local/bin/
+EXPOSE 8080
+CMD ["jumpboot-mcp", "-transport", "http", "-addr", ":8080"]
+```
+
+Connect to the MCP server at `http://container-host:8080/mcp`
 
 ## MCP Tools (26 total)
 

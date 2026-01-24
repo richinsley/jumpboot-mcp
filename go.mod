@@ -5,7 +5,7 @@ go 1.25.4
 require (
 	github.com/google/uuid v1.6.0
 	github.com/mark3labs/mcp-go v0.43.2
-	github.com/richinsley/jumpboot v0.4.0
+	github.com/richinsley/jumpboot v1.0.0
 )
 
 require (

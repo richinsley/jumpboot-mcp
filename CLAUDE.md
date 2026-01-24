@@ -12,8 +12,14 @@ MCP (Model Context Protocol) server in Go that wraps the [Jumpboot](https://gith
 # Build the server
 go build -o jumpboot-mcp .
 
-# Run the server (stdio transport)
+# Run the server (stdio transport - default)
 ./jumpboot-mcp
+
+# Run the server (HTTP transport for containers)
+./jumpboot-mcp -transport http -addr :8080 -endpoint /mcp
+
+# Run with HTTPS
+./jumpboot-mcp -transport http -addr :8443 -tls-cert cert.pem -tls-key key.pem
 
 # Run tests
 go test ./...
@@ -25,6 +31,17 @@ go test -run TestName ./internal/tools/
 go get github.com/richinsley/jumpboot
 go get github.com/mark3labs/mcp-go
 ```
+
+## Transport Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-transport` | `stdio` | Transport type: `stdio` or `http` |
+| `-addr` | `:8080` | HTTP server address |
+| `-endpoint` | `/mcp` | HTTP endpoint path |
+| `-stateless` | `false` | Stateless mode (no session tracking) |
+| `-tls-cert` | | TLS certificate file |
+| `-tls-key` | | TLS key file |
 
 ## Architecture
 
@@ -77,9 +94,11 @@ Or on error:
 {"success": false, "data": null, "error": "message"}
 ```
 
-## Key Jumpboot API Patterns
+## Key Jumpboot API Patterns (v1.0.0)
 
 ```go
+// All functions return *jumpboot.PythonEnvironment (renamed from Environment in v1.0.0)
+
 // Create base environment with micromamba
 baseEnv, err := jumpboot.CreateEnvironmentMamba(name, rootDir, pythonVersion, "conda-forge", nil)
 
@@ -98,13 +117,15 @@ output, err := env.RunPythonReadCombined(scriptPath)
 output, err := env.RunPythonReadStdout("-m", "pip", "freeze")
 
 // REPL (persistent sessions)
-repl, err := env.NewREPLPythonProcess(nil, nil, nil, nil)
+repl, err := env.NewREPLPythonProcess(kvpairs, env_vars, modules, packages)
 result, err := repl.Execute(code, true)  // true = combined output
+result, err := repl.ExecuteWithTimeout(code, true, 30*time.Second)  // with timeout
 repl.Close()
 
 // Freeze/restore
 env.FreezeToFile(filePath)
 env, err := jumpboot.CreateEnvironmentFromJSONFile(jsonPath, rootDir, nil)
+env, err := jumpboot.CreateEnvironmentFromJSONFileWithOptions(jsonPath, rootDir, opts, nil)
 ```
 
 ## MCP Tools Reference (26 tools)

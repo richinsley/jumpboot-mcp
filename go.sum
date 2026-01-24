@@ -23,8 +23,8 @@ github.com/mark3labs/mcp-go v0.43.2 h1:21PUSlWWiSbUPQwXIJ5WKlETixpFpq+WBpbMGDSVy
 github.com/mark3labs/mcp-go v0.43.2/go.mod h1:YnJfOL382MIWDx1kMY+2zsRHU/q78dBg9aFb8W6Thdw=
 github.com/pmezard/go-difflib v1.0.0 h1:4DBwDE0NGyQoBHbLQYPwSUPoCMWR5BEzIk/f1lZbAQM=
 github.com/pmezard/go-difflib v1.0.0/go.mod h1:iKH77koFhYxTK1pcRnkKkqfTogsbg7gZNVY4sRDYZ/4=
-github.com/richinsley/jumpboot v0.4.0 h1:jKxqfaZb8H5YhdBmkTCmHYAIHr3kDSgt0z8wBRZKJ9w=
-github.com/richinsley/jumpboot v0.4.0/go.mod h1:MQP5TP3J4zUfKqHKIQkzb/HpOyOf1eueyx5XuTGJDSM=
+github.com/richinsley/jumpboot v1.0.0 h1:OFy9zVXCzxX+mBrZGxaAf58jElTI7JTaGVK+KxeSlBY=
+github.com/richinsley/jumpboot v1.0.0/go.mod h1:Em6j2aeSejSnRE8p3wBuf2kOqhuW6KTYtCSYcKG1B5U=
 github.com/rogpeppe/go-internal v1.9.0 h1:73kH8U+JUqXU8lRuOHeVHaa/SZPifC7BkcraZVejAe8=
 github.com/rogpeppe/go-internal v1.9.0/go.mod h1:WtVeX8xhTBvf0smdhujwtBcq4Qrzq/fJaraNFVN+nFs=
 github.com/spf13/cast v1.7.1 h1:cuNEagBQEHWN1FnbGEjCXL2szYEXqfJPbP2HNUaca9Y=

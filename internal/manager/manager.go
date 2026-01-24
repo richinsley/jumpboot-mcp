@@ -24,19 +24,19 @@ type Manager struct {
 	environments     map[string]*ManagedEnvironment
 	replSessions     map[string]*ManagedREPL
 	spawnedProcesses map[string]*ManagedProcess
-	baseEnvironments map[string]*jumpboot.Environment // base envs by version (e.g., "3.11" -> env)
+	baseEnvironments map[string]*jumpboot.PythonEnvironment // base envs by version (e.g., "3.11" -> env)
 	baseMu           sync.Mutex                       // separate lock for base environment creation
 	baseDir          string
 }
 
-// ManagedEnvironment wraps a jumpboot Environment with metadata
+// ManagedEnvironment wraps a jumpboot PythonEnvironment with metadata
 type ManagedEnvironment struct {
-	ID           string                `json:"id"`
-	Name         string                `json:"name"`
-	Env          *jumpboot.Environment `json:"-"`
-	PythonVer    string                `json:"python_version"`
-	WorkspaceDir string                `json:"workspace_dir,omitempty"`
-	RootDir      string                `json:"root_dir"` // The venv directory
+	ID           string                      `json:"id"`
+	Name         string                      `json:"name"`
+	Env          *jumpboot.PythonEnvironment `json:"-"`
+	PythonVer    string                      `json:"python_version"`
+	WorkspaceDir string                      `json:"workspace_dir,omitempty"`
+	RootDir      string                      `json:"root_dir"` // The venv directory
 }
 
 // ManagedREPL wraps a jumpboot REPL session with metadata
@@ -108,14 +108,14 @@ func NewManager(baseDir string) (*Manager, error) {
 		environments:     make(map[string]*ManagedEnvironment),
 		replSessions:     make(map[string]*ManagedREPL),
 		spawnedProcesses: make(map[string]*ManagedProcess),
-		baseEnvironments: make(map[string]*jumpboot.Environment),
+		baseEnvironments: make(map[string]*jumpboot.PythonEnvironment),
 		baseDir:          baseDir,
 	}, nil
 }
 
 // getOrCreateBase returns a base micromamba environment for the given Python version.
 // If one doesn't exist, it creates it. Uses baseMu to serialize base creation.
-func (m *Manager) getOrCreateBase(pythonVersion string) (*jumpboot.Environment, error) {
+func (m *Manager) getOrCreateBase(pythonVersion string) (*jumpboot.PythonEnvironment, error) {
 	// Quick check with read lock
 	m.mu.RLock()
 	if baseEnv, ok := m.baseEnvironments[pythonVersion]; ok {
