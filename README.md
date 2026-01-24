@@ -11,6 +11,19 @@ An MCP (Model Context Protocol) server that wraps the [Jumpboot](https://github.
 - **Workspace Management**: Persistent code folders for writing files, cloning repos, and executing scripts
 - **Long-running Processes**: Spawn GUI apps, servers, games, and other persistent Python processes
 - **Environment Portability**: Freeze and restore environments for reproducibility
+- **Server Federation**: Discover and proxy to remote jumpboot-mcp servers via mDNS
+
+## Table of Contents
+
+- [Installation](#installation)
+- [Quick Start](#quick-start)
+- [Transport Options](#transport-options)
+- [Server Federation (mDNS)](#server-federation-mdns)
+- [Docker Deployment](#docker-deployment)
+- [Claude Desktop Configuration](#claude-desktop-configuration)
+- [Claude Code Configuration](#claude-code-configuration)
+- [MCP Tools Reference](#mcp-tools-reference)
+- [Usage Examples](#usage-examples)
 
 ## Installation
 
@@ -27,25 +40,42 @@ cd jumpboot-mcp
 go build -o jumpboot-mcp .
 ```
 
-## Usage
+## Quick Start
 
-### Transport Options
+### Local Usage (stdio)
 
-The server supports two transport modes:
+Run the server locally for Claude Desktop or Claude Code:
 
-#### stdio (default)
-Standard input/output transport for local use with Claude Desktop or Claude Code:
 ```bash
 ./jumpboot-mcp
 ```
 
-#### HTTP (Streamable HTTP with SSE)
-HTTP transport for containerized deployments or remote access:
+### HTTP Server
+
+Run as an HTTP server for remote access or containers:
+
 ```bash
-./jumpboot-mcp -transport http -addr :8080 -endpoint /mcp
+./jumpboot-mcp -transport http -addr :8080
 ```
 
-**HTTP Options:**
+### Federated Setup
+
+Run an HTTP server that announces itself on the network:
+
+```bash
+# On a GPU server
+./jumpboot-mcp -transport http -addr :8080 -note "GPU server for ML"
+```
+
+Then run a local stdio instance that discovers and proxies to it:
+
+```bash
+# On your local machine - discovers gpu-server automatically
+./jumpboot-mcp
+```
+
+## Transport Options
+
 | Flag | Default | Description |
 |------|---------|-------------|
 | `-transport` | `stdio` | Transport type: `stdio` or `http` |
@@ -55,134 +85,205 @@ HTTP transport for containerized deployments or remote access:
 | `-tls-cert` | | TLS certificate file (enables HTTPS) |
 | `-tls-key` | | TLS key file (enables HTTPS) |
 
-**HTTPS Example:**
+## Server Federation (mDNS)
+
+Jumpboot-mcp supports automatic service discovery via mDNS (Bonjour/Avahi). This enables a powerful federation model where:
+
+1. **HTTP servers** announce themselves on the local network
+2. **Stdio clients** discover HTTP servers and proxy their tools
+3. **Claude** sees all tools (local + remote) with prefixed names
+
+### mDNS Flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-note` | `""` | Human-readable server description (e.g., "GPU server for ML") |
+| `-instance-name` | hostname | Unique mDNS instance name (used as tool prefix) |
+| `-mdns-announce` | `true` | Enable mDNS announcement (HTTP mode only) |
+| `-mdns-discover` | `true` | Enable mDNS discovery (stdio mode only) |
+| `-discover-timeout` | `5s` | How long to wait for discovery at startup |
+
+### How Federation Works
+
+```
+┌─────────────────┐     mDNS Discovery      ┌─────────────────────┐
+│  Claude Desktop │ ◄──────────────────────►│  HTTP Server A      │
+│  or Claude Code │                         │  (gpu-server)       │
+│                 │     HTTP/MCP Protocol   │  -note "GPU for ML" │
+│  ┌───────────┐  │ ◄─────────────────────► │                     │
+│  │ stdio     │  │                         └─────────────────────┘
+│  │ jumpboot  │  │
+│  │ -mcp      │  │     mDNS Discovery      ┌─────────────────────┐
+│  │           │  │ ◄──────────────────────►│  HTTP Server B      │
+│  │ (local +  │  │                         │  (pi-cluster)       │
+│  │  proxied  │  │     HTTP/MCP Protocol   │  -note "Raspberry"  │
+│  │  tools)   │  │ ◄─────────────────────► │                     │
+│  └───────────┘  │                         └─────────────────────┘
+└─────────────────┘
+
+Tools visible to Claude:
+  - create_environment        (local)
+  - run_code                  (local)
+  - gpu-server:create_environment   (proxied)
+  - gpu-server:run_code             (proxied)
+  - pi-cluster:create_environment   (proxied)
+  - pi-cluster:run_code             (proxied)
+```
+
+### Tool Naming Convention
+
+Remote tools are prefixed with the server's instance name:
+
+| Original Tool | Proxied Tool Name |
+|--------------|-------------------|
+| `create_environment` | `gpu-server:create_environment` |
+| `run_code` | `gpu-server:run_code` |
+| `install_packages` | `gpu-server:install_packages` |
+
+Tool descriptions are enhanced with the server's note:
+- Original: `"Create a new Python environment"`
+- Proxied: `"[GPU server for ML] Create a new Python environment"`
+
+### Federation Setup Examples
+
+#### Example 1: GPU Server + Local Machine
+
+**On the GPU server (machine with CUDA):**
 ```bash
-./jumpboot-mcp -transport http -addr :8443 -tls-cert cert.pem -tls-key key.pem
+./jumpboot-mcp \
+  -transport http \
+  -addr :8080 \
+  -instance-name gpu-server \
+  -note "GPU server with CUDA for ML workloads"
 ```
 
-## Configuration
+**On your local machine:**
+```bash
+# Just run normally - it discovers gpu-server automatically
+./jumpboot-mcp
 
-### Claude Desktop
-
-Add to `~/.config/claude/claude_desktop_config.json`:
-
-**stdio (local binary):**
-```json
-{
-  "mcpServers": {
-    "jumpboot": {
-      "command": "/path/to/jumpboot-mcp",
-      "args": []
-    }
-  }
-}
+# Output:
+# Discovered 1 remote jumpboot-mcp service(s):
+#   - gpu-server at http://192.168.1.100:8080/mcp (GPU server with CUDA for ML workloads)
+#     Connected successfully
+# Registered 26 proxied tools from remote servers
 ```
 
-> **Note:** Claude Desktop currently only supports stdio transport for local binaries. For HTTP transport, use Claude Code or another MCP client with HTTP support.
+Now Claude can use both local tools and `gpu-server:*` tools.
 
-### Claude Code
+#### Example 2: Multiple Specialized Servers
 
-Add to your MCP settings (`.mcp.json` or via `claude mcp add`):
-
-**stdio (local binary):**
-```json
-{
-  "mcpServers": {
-    "jumpboot": {
-      "command": "/path/to/jumpboot-mcp"
-    }
-  }
-}
+**Server 1 - ML workloads:**
+```bash
+./jumpboot-mcp -transport http -addr :8080 \
+  -instance-name ml-server \
+  -note "ML server with PyTorch/TensorFlow"
 ```
 
-**HTTP (remote/container):**
-```json
-{
-  "mcpServers": {
-    "jumpboot": {
-      "type": "url",
-      "url": "http://localhost:8080/mcp"
-    }
-  }
-}
+**Server 2 - Data processing:**
+```bash
+./jumpboot-mcp -transport http -addr :8080 \
+  -instance-name data-server \
+  -note "Data server with Pandas/Spark"
 ```
 
-**HTTPS (remote/container with TLS):**
-```json
-{
-  "mcpServers": {
-    "jumpboot": {
-      "type": "url",
-      "url": "https://your-server:8443/mcp"
-    }
-  }
-}
+**Server 3 - Web scraping:**
+```bash
+./jumpboot-mcp -transport http -addr :8080 \
+  -instance-name scraper \
+  -note "Scraping server with Selenium/Playwright"
 ```
 
-### Docker
+**Local stdio client:**
+```bash
+./jumpboot-mcp
+# Discovers all three servers, registers:
+#   - Local tools (26)
+#   - ml-server:* tools (26)
+#   - data-server:* tools (26)
+#   - scraper:* tools (26)
+# Total: 104 tools available to Claude
+```
 
-A Dockerfile is included for containerized deployments using HTTP transport.
+#### Example 3: Disable Discovery/Announcement
 
-#### Build the Image
+**HTTP server without mDNS (manual configuration only):**
+```bash
+./jumpboot-mcp -transport http -addr :8080 -mdns-announce=false
+```
+
+**Stdio client without discovery (local tools only):**
+```bash
+./jumpboot-mcp -mdns-discover=false
+```
+
+### Verifying mDNS Announcement
+
+**On macOS:**
+```bash
+dns-sd -B _jumpboot-mcp._tcp
+```
+
+**On Linux (with avahi):**
+```bash
+avahi-browse -r _jumpboot-mcp._tcp
+```
+
+## Docker Deployment
+
+### Build the Image
 
 ```bash
 docker build -t jumpboot-mcp .
 ```
 
-#### Run the Container
+### Basic HTTP Server
 
-Basic usage:
 ```bash
 docker run -p 8080:8080 jumpboot-mcp
 ```
 
-With persistent storage (recommended):
+### With Persistent Storage (Recommended)
+
 ```bash
-docker run -p 8080:8080 -v jumpboot-data:/root/.jumpboot-mcp jumpboot-mcp
+docker run -p 8080:8080 \
+  -v jumpboot-data:/root/.jumpboot-mcp \
+  jumpboot-mcp
 ```
 
-The volume persists cached micromamba bases and environments across container restarts, avoiding repeated Python downloads.
+The volume persists cached micromamba bases and environments across container restarts.
 
-#### Custom Configuration
+### With mDNS Announcement
 
-Override the default command to change options:
-```bash
-# Different port
-docker run -p 9000:9000 jumpboot-mcp -transport http -addr :9000
-
-# Custom endpoint
-docker run -p 8080:8080 jumpboot-mcp -transport http -addr :8080 -endpoint /api/mcp
-
-# Stateless mode
-docker run -p 8080:8080 jumpboot-mcp -transport http -addr :8080 -stateless
-```
-
-#### HTTPS Configuration
-
-To enable HTTPS, mount your TLS certificate and key into the container:
+For mDNS to work in Docker, use host networking:
 
 ```bash
-docker run -p 8443:8443 \
-  -v /path/to/cert.pem:/certs/cert.pem:ro \
-  -v /path/to/key.pem:/certs/key.pem:ro \
+docker run --network host \
   -v jumpboot-data:/root/.jumpboot-mcp \
   jumpboot-mcp \
-  -transport http -addr :8443 -tls-cert /certs/cert.pem -tls-key /certs/key.pem
+  -transport http -addr :8080 \
+  -instance-name docker-server \
+  -note "Docker container with Python environments"
 ```
 
-Or mount a directory containing both files:
+> **Note:** `--network host` is required for mDNS multicast to work. On macOS Docker Desktop, host networking has limitations - consider running the binary directly instead.
+
+### With HTTPS
 
 ```bash
 docker run -p 8443:8443 \
+  -v jumpboot-data:/root/.jumpboot-mcp \
   -v /path/to/certs:/certs:ro \
-  -v jumpboot-data:/root/.jumpboot-mcp \
   jumpboot-mcp \
-  -transport http -addr :8443 -tls-cert /certs/cert.pem -tls-key /certs/key.pem
+  -transport http -addr :8443 \
+  -tls-cert /certs/cert.pem \
+  -tls-key /certs/key.pem
 ```
 
-#### Docker Compose Example
+### Docker Compose
 
-HTTP:
+#### Basic HTTP Server
+
 ```yaml
 version: '3.8'
 services:
@@ -198,217 +299,338 @@ volumes:
   jumpboot-data:
 ```
 
-HTTPS:
+#### With mDNS (Host Networking)
+
 ```yaml
 version: '3.8'
 services:
   jumpboot-mcp:
     build: .
-    ports:
-      - "8443:8443"
+    network_mode: host
     volumes:
       - jumpboot-data:/root/.jumpboot-mcp
-      - ./certs:/certs:ro
-    command: ["-transport", "http", "-addr", ":8443", "-tls-cert", "/certs/cert.pem", "-tls-key", "/certs/key.pem"]
+    command:
+      - "-transport"
+      - "http"
+      - "-addr"
+      - ":8080"
+      - "-instance-name"
+      - "docker-jumpboot"
+      - "-note"
+      - "Docker Python environment server"
     restart: unless-stopped
 
 volumes:
   jumpboot-data:
 ```
 
-#### Connecting to the Container
+#### Multiple Servers
 
-HTTP:
+```yaml
+version: '3.8'
+services:
+  ml-server:
+    build: .
+    network_mode: host
+    volumes:
+      - ml-data:/root/.jumpboot-mcp
+    command: ["-transport", "http", "-addr", ":8080", "-instance-name", "ml-server", "-note", "ML workloads"]
+
+  data-server:
+    build: .
+    network_mode: host
+    volumes:
+      - data-data:/root/.jumpboot-mcp
+    command: ["-transport", "http", "-addr", ":8081", "-instance-name", "data-server", "-note", "Data processing"]
+
+volumes:
+  ml-data:
+  data-data:
 ```
-http://localhost:8080/mcp
+
+## Claude Desktop Configuration
+
+Claude Desktop uses stdio transport. Configure in:
+- **macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+- **Linux**: `~/.config/claude/claude_desktop_config.json`
+
+### Local Only (No Federation)
+
+```json
+{
+  "mcpServers": {
+    "jumpboot": {
+      "command": "/path/to/jumpboot-mcp",
+      "args": ["-mdns-discover=false"]
+    }
+  }
+}
 ```
 
-HTTPS:
+### With Federation (Recommended)
+
+```json
+{
+  "mcpServers": {
+    "jumpboot": {
+      "command": "/path/to/jumpboot-mcp",
+      "args": []
+    }
+  }
+}
 ```
-https://localhost:8443/mcp
+
+This will:
+1. Start local jumpboot-mcp in stdio mode
+2. Discover any HTTP jumpboot-mcp servers on the network via mDNS
+3. Proxy remote tools with prefixed names (e.g., `gpu-server:run_code`)
+
+### Custom Discovery Timeout
+
+If discovery is slow on your network:
+
+```json
+{
+  "mcpServers": {
+    "jumpboot": {
+      "command": "/path/to/jumpboot-mcp",
+      "args": ["-discover-timeout", "10s"]
+    }
+  }
+}
 ```
 
-For MCP clients that support HTTP transport, configure the appropriate URL based on your setup.
+### Multiple Explicit Servers (No mDNS)
 
-## MCP Tools (26 total)
+If you can't use mDNS, configure multiple servers directly:
 
-### Environment Management
+```json
+{
+  "mcpServers": {
+    "jumpboot-local": {
+      "command": "/path/to/jumpboot-mcp",
+      "args": ["-mdns-discover=false"]
+    }
+  }
+}
+```
+
+> **Note:** Claude Desktop doesn't support HTTP transport directly. For HTTP servers without mDNS, use the federation approach with a local stdio instance that discovers them.
+
+## Claude Code Configuration
+
+Claude Code supports both stdio and HTTP transports.
+
+### Configure via CLI
+
+**Add local stdio server:**
+```bash
+claude mcp add jumpboot /path/to/jumpboot-mcp
+```
+
+**Add local stdio with federation:**
+```bash
+claude mcp add jumpboot /path/to/jumpboot-mcp
+# Federation happens automatically via mDNS
+```
+
+**Add remote HTTP server directly:**
+```bash
+claude mcp add jumpboot-gpu --transport http http://gpu-server:8080/mcp
+```
+
+### Configure via .mcp.json
+
+Create `.mcp.json` in your project root or home directory:
+
+#### Local with Federation (Recommended)
+
+```json
+{
+  "mcpServers": {
+    "jumpboot": {
+      "command": "/path/to/jumpboot-mcp"
+    }
+  }
+}
+```
+
+#### Local Only (No Discovery)
+
+```json
+{
+  "mcpServers": {
+    "jumpboot": {
+      "command": "/path/to/jumpboot-mcp",
+      "args": ["-mdns-discover=false"]
+    }
+  }
+}
+```
+
+#### Direct HTTP Connection (No Federation)
+
+```json
+{
+  "mcpServers": {
+    "jumpboot-remote": {
+      "type": "url",
+      "url": "http://gpu-server:8080/mcp"
+    }
+  }
+}
+```
+
+#### Multiple Direct Connections
+
+```json
+{
+  "mcpServers": {
+    "jumpboot-local": {
+      "command": "/path/to/jumpboot-mcp",
+      "args": ["-mdns-discover=false"]
+    },
+    "jumpboot-gpu": {
+      "type": "url",
+      "url": "http://gpu-server:8080/mcp"
+    },
+    "jumpboot-data": {
+      "type": "url",
+      "url": "http://data-server:8080/mcp"
+    }
+  }
+}
+```
+
+> **Note:** With direct HTTP connections, tool names are not prefixed. Use federation (stdio with mDNS) if you want automatic prefixing.
+
+### Hybrid Setup: Federation + Direct
+
+```json
+{
+  "mcpServers": {
+    "jumpboot": {
+      "command": "/path/to/jumpboot-mcp"
+    },
+    "jumpboot-cloud": {
+      "type": "url",
+      "url": "https://cloud-server.example.com:8443/mcp"
+    }
+  }
+}
+```
+
+This gives you:
+- Local tools from stdio instance
+- Auto-discovered LAN servers via mDNS (prefixed names)
+- Direct connection to cloud server (unprefixed names)
+
+## MCP Tools Reference
+
+### Environment Management (5 tools)
 
 | Tool | Description |
 |------|-------------|
-| `create_environment` | Create a new Python environment (venv from cached micromamba base) |
+| `create_environment` | Create a new Python environment |
 | `list_environments` | List all managed environments |
-| `destroy_environment` | Delete an environment and its workspace |
+| `destroy_environment` | Delete an environment and workspace |
 | `freeze_environment` | Export environment to JSON |
-| `restore_environment` | Recreate environment from frozen JSON |
+| `restore_environment` | Recreate from frozen JSON |
 
-### Package Management
+### Package Management (3 tools)
 
 | Tool | Description |
 |------|-------------|
-| `install_packages` | Install Python packages (pip or conda) |
-| `install_requirements` | Install packages from a requirements.txt file |
+| `install_packages` | Install packages (pip or conda) |
+| `install_requirements` | Install from requirements.txt |
 | `list_packages` | List installed packages |
 
-### Code Execution
+### Code Execution (2 tools)
 
 | Tool | Description |
 |------|-------------|
-| `run_code` | Execute a Python code snippet |
-| `run_script` | Execute a Python script file |
+| `run_code` | Execute Python code snippet |
+| `run_script` | Execute Python script file |
 
-### REPL Sessions
-
-| Tool | Description |
-|------|-------------|
-| `repl_create` | Create a persistent REPL session |
-| `repl_execute` | Run code in REPL (state preserved) |
-| `repl_list` | List active REPL sessions |
-| `repl_destroy` | Close a REPL session |
-
-### Workspace Management
+### REPL Sessions (4 tools)
 
 | Tool | Description |
 |------|-------------|
-| `workspace_create` | Create a code folder for an environment |
-| `workspace_write_file` | Write a file to the workspace (supports subdirs) |
-| `workspace_read_file` | Read a file from the workspace (supports subdirs) |
-| `workspace_list_files` | List files in the workspace or subdirectory |
-| `workspace_delete_file` | Delete a file from the workspace |
-| `workspace_run_script` | Run a script from the workspace (supports subdirs) |
-| `workspace_git_clone` | Clone a git repository into the workspace |
-| `workspace_destroy` | Delete the workspace |
+| `repl_create` | Create persistent REPL |
+| `repl_execute` | Run code (state preserved) |
+| `repl_list` | List active sessions |
+| `repl_destroy` | Close session |
 
-### Process Management (Long-running)
+### Workspace Management (8 tools)
 
 | Tool | Description |
 |------|-------------|
-| `spawn_process` | Start a Python script in the background (GUI apps, servers, games) |
-| `list_processes` | List all spawned processes |
-| `process_output` | Get stdout/stderr from a spawned process |
-| `kill_process` | Terminate a spawned process |
+| `workspace_create` | Create code folder |
+| `workspace_write_file` | Write file to workspace |
+| `workspace_read_file` | Read file from workspace |
+| `workspace_list_files` | List workspace files |
+| `workspace_delete_file` | Delete file |
+| `workspace_run_script` | Run script from workspace |
+| `workspace_git_clone` | Clone git repository |
+| `workspace_destroy` | Delete workspace |
+
+### Process Management (4 tools)
+
+| Tool | Description |
+|------|-------------|
+| `spawn_process` | Start background process |
+| `list_processes` | List spawned processes |
+| `process_output` | Get process stdout/stderr |
+| `kill_process` | Terminate process |
 
 ## Usage Examples
 
 ### Basic Workflow
 
-1. **Create an environment**:
-   ```
-   create_environment(name="myenv", python_version="3.11")
-   → Returns env_id
-   ```
+```
+1. create_environment(name="myenv", python_version="3.11") → env_id
+2. install_packages(env_id="...", packages=["numpy", "pandas"])
+3. run_code(env_id="...", code="import numpy; print(numpy.__version__)")
+```
 
-2. **Install packages**:
-   ```
-   install_packages(env_id="...", packages=["numpy", "pandas"])
-   ```
+### Using a Remote Server
 
-3. **Run code**:
-   ```
-   run_code(env_id="...", code="import numpy; print(numpy.__version__)")
-   ```
-
-### Git Clone Workflow
-
-1. **Create workspace and clone repo**:
-   ```
-   workspace_create(env_id="...")
-   workspace_git_clone(env_id="...", repo_url="https://github.com/user/repo.git")
-   → Returns clone path and directory name
-   ```
-
-2. **Install dependencies from requirements.txt**:
-   ```
-   install_requirements(env_id="...", requirements_path="repo/requirements.txt")
-   ```
-
-3. **Run a script from the repo**:
-   ```
-   workspace_run_script(env_id="...", filename="repo/main.py")
-   ```
-
-### Workspace Workflow
-
-1. **Create workspace**:
-   ```
-   workspace_create(env_id="...")
-   → Returns workspace path
-   ```
-
-2. **Write a script**:
-   ```
-   workspace_write_file(env_id="...", filename="analysis.py", content="...")
-   ```
-
-3. **Run the script**:
-   ```
-   workspace_run_script(env_id="...", filename="analysis.py")
-   ```
+```
+1. gpu-server:create_environment(name="ml-env", python_version="3.11") → env_id
+2. gpu-server:install_packages(env_id="...", packages=["torch", "transformers"])
+3. gpu-server:run_code(env_id="...", code="import torch; print(torch.cuda.is_available())")
+```
 
 ### REPL Session
 
-1. **Create REPL**:
-   ```
-   repl_create(env_id="...", session_name="data_analysis")
-   → Returns session_id
-   ```
-
-2. **Execute code (state preserved)**:
-   ```
-   repl_execute(session_id="...", code="x = 42")
-   repl_execute(session_id="...", code="print(x)")  # prints 42
-   ```
-
-### Long-running Process (GUI App/Server/Game)
-
-1. **Write a GUI script**:
-   ```
-   workspace_write_file(env_id="...", filename="game.py", content="...")
-   ```
-
-2. **Spawn the process** (runs in background):
-   ```
-   spawn_process(env_id="...", script_path="game.py", capture_output=false)
-   → Returns process_id, PID
-   ```
-
-3. **Check running processes**:
-   ```
-   list_processes()
-   → Returns list of {process_id, name, running, pid}
-   ```
-
-4. **Terminate when done**:
-   ```
-   kill_process(process_id="...")
-   ```
-
-For servers with logging:
 ```
-spawn_process(env_id="...", script_path="server.py", capture_output=true)
-process_output(process_id="...", tail_lines=50)  # Get last 50 lines of logs
+1. repl_create(env_id="...", session_name="analysis") → session_id
+2. repl_execute(session_id="...", code="x = 42")
+3. repl_execute(session_id="...", code="print(x)")  # prints 42
+```
+
+### Long-running Process
+
+```
+1. workspace_write_file(env_id="...", filename="server.py", content="...")
+2. spawn_process(env_id="...", script_path="server.py", capture_output=true)
+3. process_output(process_id="...", tail_lines=50)
+4. kill_process(process_id="...")
 ```
 
 ## Response Format
 
-All tools return JSON responses:
+All tools return JSON:
 
 ```json
-{
-  "success": true,
-  "data": { ... },
-  "error": null
-}
+{"success": true, "data": {...}, "error": null}
 ```
 
 Or on error:
 
 ```json
-{
-  "success": false,
-  "data": null,
-  "error": "descriptive error message"
-}
+{"success": false, "data": null, "error": "descriptive error message"}
 ```
 
 ## Data Storage
@@ -417,26 +639,20 @@ All data is stored in `~/.jumpboot-mcp/envs/`:
 
 ```
 ~/.jumpboot-mcp/envs/
-├── bases/                    # Cached micromamba base environments
-│   ├── base_3.11/           # Base for Python 3.11
-│   └── base_3.12/           # Base for Python 3.12
+├── bases/                    # Cached micromamba bases
+│   ├── base_3.11/
+│   └── base_3.12/
 └── {env-uuid}/              # User environments (venvs)
     ├── bin/
     ├── lib/
-    ├── pyvenv.cfg
-    └── workspace/           # Persistent workspace for this environment
-        └── (cloned repos, scripts, etc.)
+    └── workspace/           # Persistent workspace
 ```
-
-**Environment Creation Strategy**:
-- First environment for a Python version creates a micromamba base (slower, downloads Python)
-- Subsequent environments reuse the cached base via fast venv creation
-- All environments are completely independent of system Python
 
 ## Dependencies
 
 - [github.com/richinsley/jumpboot](https://github.com/richinsley/jumpboot) - Python environment management
 - [github.com/mark3labs/mcp-go](https://github.com/mark3labs/mcp-go) - MCP protocol implementation
+- [github.com/hashicorp/mdns](https://github.com/hashicorp/mdns) - mDNS service discovery
 
 ## License
 

@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/mdns"
@@ -15,6 +16,15 @@ func Discover(ctx context.Context, timeout time.Duration) ([]ServiceInfo, error)
 
 	// Collect results
 	var services []ServiceInfo
+	var mu sync.Mutex
+
+	// Use sync.Once to ensure channel is only closed once
+	var closeOnce sync.Once
+	safeClose := func() {
+		closeOnce.Do(func() {
+			close(entriesCh)
+		})
+	}
 
 	// Start a goroutine to collect entries
 	done := make(chan struct{})
@@ -23,7 +33,9 @@ func Discover(ctx context.Context, timeout time.Duration) ([]ServiceInfo, error)
 		for entry := range entriesCh {
 			info := parseServiceEntry(entry)
 			if info != nil {
+				mu.Lock()
 				services = append(services, *info)
+				mu.Unlock()
 			}
 		}
 	}()
@@ -32,25 +44,35 @@ func Discover(ctx context.Context, timeout time.Duration) ([]ServiceInfo, error)
 	params := mdns.DefaultParams(ServiceType)
 	params.Entries = entriesCh
 	params.Timeout = timeout
+	// Disable IPv6 to avoid issues on systems without proper IPv6 support
+	params.DisableIPv6 = true
 
 	// Handle context cancellation
 	go func() {
 		select {
 		case <-ctx.Done():
-			close(entriesCh)
-		case <-time.After(timeout):
-			// Query will close the channel
+			safeClose()
+		case <-done:
+			// Collection finished, nothing to do
 		}
 	}()
 
-	// Perform the lookup
-	if err := mdns.Query(params); err != nil {
-		close(entriesCh)
-		return nil, err
+	// Perform the lookup - this closes the channel when done
+	err := mdns.Query(params)
+
+	// If query failed, close the channel so collector goroutine can exit
+	if err != nil {
+		safeClose()
 	}
 
 	// Wait for collection to complete
 	<-done
+
+	// Return services even if there was an error (we may have partial results)
+	// Only return error if we got no services
+	if err != nil && len(services) == 0 {
+		return nil, err
+	}
 
 	return services, nil
 }
