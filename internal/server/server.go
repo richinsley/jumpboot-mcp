@@ -26,7 +26,9 @@ func NewWithExtraTools(mgr *manager.Manager, extraTools []tools.ToolDef) *server
 	)
 
 	// Register all local tools
-	registerTools(s, mgr)
+	// If we have remote tools, prefix local tool descriptions with "[local]"
+	hasRemoteTools := len(extraTools) > 0
+	registerToolsWithPrefix(s, mgr, hasRemoteTools)
 
 	// Register extra tools (e.g., proxied remote tools)
 	for _, td := range extraTools {
@@ -36,7 +38,7 @@ func NewWithExtraTools(mgr *manager.Manager, extraTools []tools.ToolDef) *server
 	return s
 }
 
-func registerTools(s *server.MCPServer, mgr *manager.Manager) {
+func registerToolsWithPrefix(s *server.MCPServer, mgr *manager.Manager, addLocalPrefix bool) {
 	// Collect all tool definitions
 	allTools := []tools.ToolDef{}
 	allTools = append(allTools, tools.RegisterEnvironmentTools(mgr)...)
@@ -48,7 +50,16 @@ func registerTools(s *server.MCPServer, mgr *manager.Manager) {
 
 	// Register each tool with the server
 	for _, td := range allTools {
-		s.AddTool(td.Tool, td.Handler)
+		if addLocalPrefix {
+			// Create a copy with "[local]" prefix in description
+			localTool := mcp.NewTool(td.Tool.Name,
+				mcp.WithDescription("[local] "+td.Tool.Description),
+			)
+			localTool.InputSchema = td.Tool.InputSchema
+			s.AddTool(localTool, td.Handler)
+		} else {
+			s.AddTool(td.Tool, td.Handler)
+		}
 	}
 }
 
