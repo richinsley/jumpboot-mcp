@@ -87,8 +87,8 @@ func getLocalIPs() ([]net.IP, error) {
 			continue
 		}
 
-		// Skip virtual/container network interfaces
-		if isVirtualInterface(iface.Name) {
+		// Only include physical network interfaces (whitelist approach)
+		if !isPhysicalInterface(iface.Name) {
 			continue
 		}
 
@@ -106,8 +106,8 @@ func getLocalIPs() ([]net.IP, error) {
 				ip = v.IP
 			}
 
-			// Skip loopback, link-local, and virtual network addresses
-			if ip != nil && !ip.IsLoopback() && !ip.IsLinkLocalUnicast() && !isVirtualIP(ip) {
+			// Only include routable IPv4 addresses
+			if ip != nil && ip.To4() != nil && isRoutableIP(ip) {
 				ips = append(ips, ip)
 			}
 		}
@@ -121,30 +121,27 @@ func getLocalIPs() ([]net.IP, error) {
 	return ips, nil
 }
 
-// isVirtualInterface returns true if the interface name indicates a virtual/container network
-func isVirtualInterface(name string) bool {
-	// Common virtual interface prefixes
-	virtualPrefixes := []string{
-		"docker",    // Docker bridge
-		"br-",       // Docker/Linux bridges
-		"veth",      // Virtual ethernet (containers)
-		"virbr",     // libvirt/KVM bridges
-		"vboxnet",   // VirtualBox
-		"vmnet",     // VMware
-		"vnic",      // Virtual NIC
-		"tap",       // TAP devices
-		"tun",       // TUN devices
-		"flannel",   // Kubernetes flannel
-		"cni",       // Container Network Interface
-		"calico",    // Kubernetes calico
-		"weave",     // Kubernetes weave
-		"podman",    // Podman
-		"lxc",       // LXC containers
-		"lxd",       // LXD containers
+// isPhysicalInterface returns true if the interface looks like a physical network interface
+func isPhysicalInterface(name string) bool {
+	// Whitelist of physical interface prefixes
+	physicalPrefixes := []string{
+		// Linux
+		"eth",  // Traditional ethernet
+		"eno",  // Onboard ethernet (systemd naming)
+		"ens",  // PCI slot ethernet (systemd naming)
+		"enp",  // PCI bus ethernet (systemd naming)
+		"enx",  // MAC-based ethernet (systemd naming)
+		"wlan", // Traditional wifi
+		"wlp",  // PCI wifi (systemd naming)
+		"wls",  // PCI slot wifi (systemd naming)
+		// macOS
+		"en", // macOS ethernet/wifi (en0, en1, etc.)
+		// BSD
+		"bge", "em", "igb", "ix", "re", // Common BSD ethernet drivers
 	}
 
 	nameLower := strings.ToLower(name)
-	for _, prefix := range virtualPrefixes {
+	for _, prefix := range physicalPrefixes {
 		if strings.HasPrefix(nameLower, prefix) {
 			return true
 		}
@@ -152,25 +149,37 @@ func isVirtualInterface(name string) bool {
 	return false
 }
 
-// isVirtualIP returns true if the IP is in a common virtual/container network range
-func isVirtualIP(ip net.IP) bool {
+// isRoutableIP returns true if the IP is a normal routable address (not virtual/VPN)
+func isRoutableIP(ip net.IP) bool {
 	// Only check IPv4 addresses
 	ip4 := ip.To4()
 	if ip4 == nil {
 		return false
 	}
 
-	// Docker default bridge: 172.17.0.0/16
-	if ip4[0] == 172 && ip4[1] == 17 {
-		return true
+	// Reject loopback
+	if ip4[0] == 127 {
+		return false
 	}
 
-	// Docker user-defined bridges: 172.18.0.0/16 - 172.31.0.0/16
-	if ip4[0] == 172 && ip4[1] >= 18 && ip4[1] <= 31 {
-		return true
+	// Reject link-local (169.254.x.x)
+	if ip4[0] == 169 && ip4[1] == 254 {
+		return false
 	}
 
-	return false
+	// Reject CGNAT range (100.64.0.0/10) - used by Tailscale, carrier NAT
+	if ip4[0] == 100 && ip4[1] >= 64 && ip4[1] <= 127 {
+		return false
+	}
+
+	// Reject Docker ranges (172.17-31.x.x)
+	if ip4[0] == 172 && ip4[1] >= 17 && ip4[1] <= 31 {
+		return false
+	}
+
+	// Accept common private ranges: 10.x.x.x, 192.168.x.x, 172.16.x.x
+	// and public IPs
+	return true
 }
 
 // GetDefaultInstanceName returns the default instance name (hostname)
