@@ -14,6 +14,7 @@ import (
 	"github.com/richinsley/jumpboot-mcp/internal/manager"
 	"github.com/richinsley/jumpboot-mcp/internal/proxy"
 	mcpserver "github.com/richinsley/jumpboot-mcp/internal/server"
+	"github.com/richinsley/jumpboot-mcp/internal/tools"
 )
 
 func main() {
@@ -90,11 +91,14 @@ func runStdioMode(mgr *manager.Manager, sigChan chan os.Signal, discover bool, d
 		}
 	}
 
-	// Create the MCP server with local tools + proxy tools
+	// Create the MCP server with local tools + proxy tools + federation tools
 	var s *server.MCPServer
 	if aggregator != nil && aggregator.RemoteCount() > 0 {
 		proxyTools := aggregator.GetAllTools()
-		fmt.Fprintf(os.Stderr, "Registered %d proxied tools from remote servers\n", len(proxyTools))
+		// Add federation tools (list_servers, etc.)
+		federationTools := tools.RegisterFederationTools(aggregator)
+		proxyTools = append(proxyTools, federationTools...)
+		fmt.Fprintf(os.Stderr, "Registered %d proxied tools from remote servers\n", len(proxyTools)-len(federationTools))
 		s = mcpserver.NewWithExtraTools(mgr, proxyTools)
 	} else {
 		s = mcpserver.New(mgr)
